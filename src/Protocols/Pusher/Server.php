@@ -73,7 +73,7 @@ class Server
                     $from,
                     $event['event'],
                     empty($event['data']) ? [] : $event['data'],
-                ),
+                )?->catch(fn (Throwable $e) => $this->error($from, $e)),
                 default => ClientEvent::handle($from, $event)
             };
 

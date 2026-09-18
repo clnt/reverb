@@ -2,8 +2,11 @@
 
 use JMac\Testing\Double;
 use Laravel\Reverb\Protocols\Pusher\Contracts\ChannelManager;
+use Laravel\Reverb\Protocols\Pusher\EventHandler;
 use Laravel\Reverb\Protocols\Pusher\Server;
 use Laravel\Reverb\Tests\FakeConnection;
+
+use function React\Promise\reject;
 
 beforeEach(function () {
     $this->server = $this->app->make(Server::class);
@@ -607,4 +610,29 @@ it('allow receiving client event with empty data', function () {
     );
 
     $connection->connection()->assertNothingReceived();
+});
+
+it('sends an error if an asynchronous handler fails', function () {
+    $handler = Double::for(EventHandler::class);
+    $handler->expects('handle')->returns(reject(new Exception('Failed to gather presence data')));
+
+    $server = new Server(app(ChannelManager::class), $handler);
+
+    $server->message(
+        $connection = new FakeConnection,
+        json_encode([
+            'event' => 'pusher:subscribe',
+            'data' => [
+                'channel' => 'presence-test-channel',
+                'auth' => '',
+            ],
+        ]));
+
+    $connection->assertReceived([
+        'event' => 'pusher:error',
+        'data' => json_encode([
+            'code' => 4200,
+            'message' => 'Invalid message format',
+        ]),
+    ]);
 });

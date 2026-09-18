@@ -8,10 +8,15 @@ use Illuminate\Support\Str;
 use Laravel\Reverb\Contracts\Connection;
 use Laravel\Reverb\Protocols\Pusher\Channels\CacheChannel;
 use Laravel\Reverb\Protocols\Pusher\Channels\Channel;
+use Laravel\Reverb\Protocols\Pusher\Concerns\InteractsWithChannelInformation;
 use Laravel\Reverb\Protocols\Pusher\Contracts\ChannelManager;
+use Laravel\Reverb\ServerProviderManager;
+use React\Promise\PromiseInterface;
 
 class EventHandler
 {
+    use InteractsWithChannelInformation;
+
     /**
      * Create a new Pusher event instance.
      */
@@ -23,11 +28,11 @@ class EventHandler
     /**
      * Handle an incoming Pusher event.
      */
-    public function handle(Connection $connection, string $event, array $payload = []): void
+    public function handle(Connection $connection, string $event, array $payload = []): ?PromiseInterface
     {
         $event = Str::after($event, 'pusher:');
 
-        match ($event) {
+        $response = match ($event) {
             'connection_established' => $this->acknowledge($connection),
             'subscribe' => $this->subscribe(
                 $connection,
@@ -40,6 +45,8 @@ class EventHandler
             'pong' => $connection->touch(),
             default => throw new Exception('Unknown Pusher event: '.$event),
         };
+
+        return $response instanceof PromiseInterface ? $response : null;
     }
 
     /**
@@ -56,7 +63,7 @@ class EventHandler
     /**
      * Subscribe to the given channel.
      */
-    public function subscribe(Connection $connection, string $channel, ?string $auth = null, ?string $data = null): void
+    public function subscribe(Connection $connection, string $channel, ?string $auth = null, ?string $data = null): ?PromiseInterface
     {
         Validator::make([
             'channel' => $channel,
@@ -74,15 +81,31 @@ class EventHandler
 
         $channel->subscribe($connection, $auth, $data);
 
-        $this->afterSubscribe($channel, $connection);
+        return $this->afterSubscribe($channel, $connection);
     }
 
     /**
      * Carry out any actions that should be performed after a subscription.
      */
-    protected function afterSubscribe(Channel $channel, Connection $connection): void
+    protected function afterSubscribe(Channel $channel, Connection $connection): ?PromiseInterface
     {
-        $this->sendInternally($connection, 'subscription_succeeded', $channel->data(), $channel->name());
+        if ($this->isPresenceChannel($channel) && app(ServerProviderManager::class)->subscribesToEvents()) {
+            return app(MetricsHandler::class)
+                ->gather($connection->app(), 'presence_data', ['channel' => $channel->name()])
+                ->then(fn (array $data) => $this->sendSubscriptionSucceeded($channel, $connection, $data));
+        }
+
+        $this->sendSubscriptionSucceeded($channel, $connection, $channel->data());
+
+        return null;
+    }
+
+    /**
+     * Send the subscription succeeded payload for the given channel.
+     */
+    protected function sendSubscriptionSucceeded(Channel $channel, Connection $connection, array $data): void
+    {
+        $this->sendInternally($connection, 'subscription_succeeded', $data, $channel->name());
 
         match (true) {
             $channel instanceof CacheChannel => $this->sendCachedPayload($channel, $connection),
